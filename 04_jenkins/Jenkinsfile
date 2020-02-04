@@ -1,0 +1,98 @@
+def CONTAINER_NAME="python-api"
+def CONTAINER_TAG="latest"
+def DOCKER_HUB_USER="krajewskim"
+
+def servers = [ "SERVER_1" : [ ip:"10.0.0.144" ],
+                "SERVER_2": [ ip:"3.120.133.24" ]
+]
+def serverList = servers.keySet() as List
+
+node {
+
+    stage('Initialize'){
+        def dockerHome = tool 'myDocker'
+        env.PATH = "${dockerHome}/bin:${env.PATH}"
+    }
+
+    stage('Clone repository') {
+        checkout scm
+    }
+
+    stage('Build image') {
+        sh "echo \"Building Image ${DOCKER_HUB_USER}/${CONTAINER_NAME}:${CONTAINER_TAG}\""
+        sh "docker build -t ${DOCKER_HUB_USER}/${CONTAINER_NAME}:${CONTAINER_TAG} -f ./04_onbuild/Dockerfile ./04_onbuild/"
+    }
+
+    /* alternatywnie
+    stage('Image Build'){
+        imageBuild(CONTAINER_NAME, CONTAINER_TAG)
+    } */
+
+    /* mozna tak...
+        stage('Push image') {
+            sh "docker push ${DOCKER_HUB_USER}/${CONTAINER_NAME}:${CONTAINER_TAG}"
+        }
+    ale z jakiegos powodu tego nie zrobilem */
+
+    stage('Push to Docker Registry'){
+        withCredentials([usernamePassword(credentialsId: 'dockerHubAccount', usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD')]) {
+            pushToImage(CONTAINER_NAME, CONTAINER_TAG, USERNAME, PASSWORD)
+        }
+    }
+
+    stage('Parameters') {
+        timeout(time: 5, unit: 'MINUTES') {
+            script {
+
+                env.TARGET_SERVER = input message: 'Please select server', ok: 'Next', parameters: [
+                        choice(name: 'TARGET_SERVER',
+                                choices: serverList)
+                ]
+
+                env.SSH_USER = "ubuntu"
+                env.TARGET_IP = servers[env.TARGET_SERVER]['ip']
+            }
+        }
+    }
+
+    stage('Deploy to server'){
+        sh "echo Done!"
+        sshagent(credentials : ['maciek_key']) {
+             sh """#!/bin/bash -e
+                ssh -o StrictHostKeyChecking=no ${SSH_USER}@${TARGET_IP} /bin/bash << 'ENDSSH'
+                    if [[ -d ./docker-short ]]; then
+                        echo "removing old dir"
+                        rm -R docker-short
+                    fi
+                    git clone https://github.com/maciejkra/docker-short.git
+                    cd docker-short/06_compose_python_redis
+                    docker-compose pull
+                    docker-compose up -d
+ENDSSH
+            """
+        }
+    }
+
+}
+
+def imageBuild(containerName, tag){
+    sh "docker build -t $containerName:$tag  -t $containerName --pull --no-cache ."
+    echo "Image build complete"
+}
+
+def pushToImage(containerName, tag, dockerUser, dockerPassword){
+    sh "docker login -u $dockerUser -p $dockerPassword"
+//   sh "docker tag $containerName:$tag $dockerUser/$containerName:$tag"
+    sh "docker push $dockerUser/$containerName:$tag"
+    echo "Image push complete"
+}
+
+
+String getTag() {
+    def branchName = env.BRANCH_NAME
+    if (branchName == "master") {
+        return "latest"
+    } else if (branchName == "develop" || branchName == "" || branchName == null) {
+        return "snapshot"
+    } else return branchName.toLowerCase().replaceAll("/", "_")
+}
